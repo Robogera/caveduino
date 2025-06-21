@@ -1,8 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(core_intrinsics)]
-
-use core::intrinsics::unchecked_add;
 
 use arduino_hal::{
     delay_ms,
@@ -13,8 +10,27 @@ use panic_halt as _;
 
 use debouncr::{debounce_stateful_16, Edge};
 
-const BRGHT_DEPTH: u8 = 125;
-const BRGHT_STEP: u8 = 1;
+const BR_STEP: u8 = 1;
+
+enum BrightnessMode {
+    Up,
+    Down,
+}
+
+impl BrightnessMode {
+    fn flip(&mut self) {
+        match self {
+            Self::Up => *self = BrightnessMode::Down,
+            Self::Down => *self = BrightnessMode::Up,
+        };
+    }
+}
+
+enum ButtonMode {
+    Off,
+    On,
+    StartOnly,
+}
 
 #[arduino_hal::entry]
 fn main() -> ! {
@@ -36,31 +52,58 @@ fn main() -> ! {
     let mut db2 = debounce_stateful_16(true);
 
     let mut brght = 0_u8;
-    let mut brght_up = true;
+    let mut brightness_mode = BrightnessMode::Down;
+    let mut button_mode = ButtonMode::StartOnly;
 
     loop {
         let edge1 = db1.update(butt1.is_low());
         let edge2 = db2.update(butt2.is_low());
         if let Some(Edge::Falling) = edge1 {
-            ufmt::uwriteln!(&mut serial, "{}", 'n').unwrap_infallible();
+            serial.write_byte(b'n');
+            serial.write_byte(b'\n');
         }
         if let Some(Edge::Falling) = edge2 {
-            ufmt::uwriteln!(&mut serial, "{}", 'b').unwrap_infallible();
+            serial.write_byte(b'p');
+            serial.write_byte(b'\n');
         }
 
-        if brght > 245 {
-            brght = 245;
-            brght_up = false;
-        } else if brght <= 245 - BRGHT_DEPTH {
-            brght = 245 - BRGHT_DEPTH;
-            brght_up = true;
+        button_mode = match serial.read() {
+            Ok(b's') => ButtonMode::StartOnly,
+            Ok(b'n') => ButtonMode::Off,
+            Ok(b'b') => ButtonMode::On,
+            _ => button_mode,
+        };
+
+        match button_mode {
+            ButtonMode::StartOnly => {
+                led2_pwm.set_duty(125 + brght / 2);
+                led1_pwm.set_duty(0);
+            }
+            ButtonMode::On => {
+                led1_pwm.set_duty(4 + brght / 10);
+                led2_pwm.set_duty(4 + brght / 10);
+            }
+            ButtonMode::Off => {
+                led1_pwm.set_duty(4);
+                led2_pwm.set_duty(4);
+            }
         }
-        led1_pwm.set_duty(brght);
-        led2_pwm.set_duty(brght);
-        brght = if brght_up {
-            brght + BRGHT_STEP
-        } else {
-            brght - BRGHT_STEP
+
+        brght = match brightness_mode {
+            BrightnessMode::Up => match brght.checked_add(BR_STEP) {
+                Some(value) => value,
+                None => {
+                    brightness_mode.flip();
+                    core::u8::MAX
+                }
+            },
+            BrightnessMode::Down => match brght.checked_sub(BR_STEP) {
+                Some(value) => value,
+                None => {
+                    brightness_mode.flip();
+                    core::u8::MIN
+                }
+            },
         };
         delay_ms(10);
     }
